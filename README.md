@@ -35,8 +35,10 @@
 | Stateful V4L2 M2M解码 | `V4L2_PIX_FMT_MPEG4`、`VC1_ANNEX_G/L` | 内核解析压缩码流并管理显示/参考状态；不是Request控件 |
 | V4L2 M2M | `h264_v4l2m2m` | 使用 HiVXE VENC 做 H.264 4:2:0 编码 |
 | JPGE | 独立 JPEG V4L2 M2M 接口 | JPEG 编码，不与 VDEC Request 节点混用 |
-| JPGD | 原厂独立 JPEG 解码模块 | 当前 Linux 尚无 JPGD 节点，不能借用 JPGE 或 VDEC 节点解码 JPEG |
-| VPSS/MCDEI | `histb-vpss` 及原厂后处理链 | 当前 Linux 承担 VDEC 的 tile-to-linear、ZME 下采样和可选 field-rate DEI；完整 MCDI/TNR 仍未开放 |
+| JPGD | `histb-jpgd` 独立JPEG V4L2 M2M实现 | 已新增JPEG输入和NV12/NV16/YUYV输出枚举；表解析、采样配置及用户态协商仍有缺口，不能据节点存在宣称完整硬解 |
+| VPSS/MCDEI | `histb-vpss` 内部路径及独立M2M节点 | VDEC的tile-to-linear、ZME和四场DEI已有路径；新增独立格式转换、MCDI/TNR与目标尺寸分支的完成度及UAPI兼容限制见后处理章节 |
+
+`/dev/videoN` 与 `/dev/mediaN` 编号由探测/加载顺序决定，不是固定ABI；应按驱动名称、设备能力和media拓扑识别节点，不能把一次运行的video0..video4编号直接写死到所有系统。独立VPSS M2M节点与VDEC私有DEI ioctl不是同一接口。
 
 ## 解码
 
@@ -161,10 +163,10 @@ CV200实际SPS要求4:2:0，luma位深上限10-bit；不提供4:0:0、4:2:2、4:
 
 | 支持的能力 | 说明 |
 | --- | --- |
-| 8-bit 4:2:0 | BSP MPEG-2解析器/HAL内有MPEG-1分支；本项目Linux不开放此格式，未将DC-only诊断输出视作成功。 |
-| I图像 | BSP有图像与slice消息；Linux不提供MPEG-1硬件接口。 |
-| P图像 | BSP有前向参考与full-pel语义；Linux不提供MPEG-1硬件接口。 |
-| B图像 | BSP有双向参考语义；Linux不提供MPEG-1硬件接口。 |
+| 8-bit 4:2:0 | BSP有MPEG-1分支；Linux现允许MPEG2_SLICE Request以零profile提交，FFmpeg也新增mpeg1_v4l2request。但MPEG-1专用硬件配置/消息语义未闭合，不能把接收请求或DC-only输出视作完整硬解。 |
+| I图像 | 已复用MPEG-2 Request语法提交；硬件仍配置为MPEG-2，不据此升级完整MPEG-1 I图像支持。 |
+| P图像 | BSP有前向参考与full-pel语义；当前FFmpeg Request控件未传递MPEG-1 full-pel标志，内核消息也未补齐对应语义。 |
+| B图像 | BSP有双向参考语义；与P图像相同的full-pel/消息缺口仍在，接口存在不等于完整重建正确。 |
 
 ### MPEG-2
 
@@ -237,7 +239,8 @@ CV200实际SPS要求4:2:0，luma位深上限10-bit；不提供4:0:0、4:2:2、4:
 | Advanced Profile | ✅ | 🟨 |
 | 逐行图像 | ✅ | ✅ |
 | Advanced frame-interlace I/P/B | ✅ | ✅ |
-| Advanced frame-interlace BI/SKIP | 🟨 | ❌ |
+| Advanced frame-interlace BI | 🟨 | ✅ |
+| Advanced SKIP输出 | 🟨 | 🟨 |
 | Advanced field-interlace | ✅ | ✅ |
 | 逐行B / BI图像 | ✅ | ✅ |
 | Bitplane / BPD | ✅ | ✅ |
@@ -245,17 +248,18 @@ CV200实际SPS要求4:2:0，luma位深上限10-bit；不提供4:0:0、4:2:2、4:
 | RESPIC | ✅ | ✅ |
 | Main range reduction | ✅ | ✅ |
 | Advanced range mapping | ✅ | ✅ |
-| PSF | 🟨 | ❌ |
+| PSF | 🟨 | 🟨 |
 | 场slice重复picture header | 🟨 | ❌ |
 
 | 支持的能力 | 说明 |
 | --- | --- |
 | Simple Profile | Linux Annex L解析profile 0，仅接受符合Simple限制的逐行工具组合。 |
 | Main Profile | Linux Annex L解析profile 1且要求RES_RTM=1；不是V4L2 Request。 |
-| Advanced Profile | Annex G的主要帧/场路径已实现，但PSF、隔行BI/SKIP和重复场slice头仍被拒绝，不能承诺完整profile。 |
+| Advanced Profile | Annex G主要帧/场路径已有实现，新增frame-interlace BI和SKIP分支；PSF后续语义及重复场slice头仍不完整，不能承诺完整profile。 |
 | 逐行图像 | Simple/Main/Advanced分别遵循各自语法限制。 |
 | Advanced frame-interlace I/P/B | 参考、bitplane和帧编码几何独立处理。 |
-| Advanced frame-interlace BI/SKIP | Linux明确拒绝隔行frame BI及非逐行SKIP；BSP变体覆盖未单独闭合。 |
+| Advanced frame-interlace BI | Linux已允许该变体进入BPD/消息/VDH路径；实现状态不代表所有组合已实测。 |
+| Advanced SKIP输出 | Linux已接收SKIP并由CPU复制最近参考tile/PMV完成输出，不是新的硬件重建；不能将该混合路径计为纯硬件SKIP解码。 |
 | Advanced field-interlace | 首场、次场、场事务及参考/输出生命周期有独立实现。 |
 | 逐行B / BI图像 | 支持相应profile允许的图像类型；Simple不允许违反其B帧限制。 |
 | Bitplane / BPD | bitplane解析、DMA、UP完成校验和参考语义都有路径。 |
@@ -263,7 +267,7 @@ CV200实际SPS要求4:2:0，luma位深上限10-bit；不提供4:0:0、4:2:2、4:
 | RESPIC | 按当前coded macroblock网格计算BPD与重建区域。 |
 | Main range reduction | Main语法及参考表面处理有路径。 |
 | Advanced range mapping | 有捕获后range-map helper；Linux在CPU执行该后处理，不是纯硬件range mapping。 |
-| PSF | Linux Advanced sequence parser明确拒绝PSF；BSP完整输出变体未证明。 |
+| PSF | Linux已读取并接受PSF标志，不再显式拒绝；但尚无后续专门语义处理依据，因此只标部分实现。 |
 | 场slice重复picture header | Linux拒绝field slice picture_header_flag=1；不要与已实现的独立场路径混淆。 |
 
 ### VP8
@@ -367,10 +371,10 @@ CV200实际SPS要求4:2:0，luma位深上限10-bit；不提供4:0:0、4:2:2、4:
 
 | 支持的能力 | 说明 |
 | --- | --- |
-| Stereo High（profile 128）双视角 | BSP subset-SPS、inter-view reference及H.264 HAL消息可达；Linux没有公开MVC前端/双视角输出。 |
+| Stereo High（profile 128）双视角 | BSP subset-SPS、inter-view reference及HAL消息可达；Linux已链接MVC helper并加入参考/消息挂钩，公开扩展NAL输入及双视角输出仍未闭合。 |
 | Multiview High（profile 118）双视角 | CV200 BSP最多两个视角；不承诺任意N视角。 |
 
-CV200 subset-SPS明确限制最多两个视角。Linux虽接受118/128的profile ID，但当前构建不链接独立MVC实现，也未接通inter-view参考管理和双视角输出；旧构建对象不构成支持。
+CV200 subset-SPS明确限制最多两个视角。当前Linux构建已链接 `histb-vdec-mvc`，有inter-view/DPB辅助逻辑，但未接通公开subset-SPS/MVC NAL摄入、view选择及双视角输出；FFmpeg现有H.264路径也未补齐dependent-view解码入口。接受profile 118/128或链接对象不构成完整MVC支持。
 
 ### RealVideo
 
@@ -382,8 +386,8 @@ CV200 subset-SPS明确限制最多两个视角。Linux虽接受118/128的profile
 
 | 支持的能力 | 说明 |
 | --- | --- |
-| RealVideo 8 / RV30 | CV200产品配置选择real8语法及HAL；Linux不开放此格式，内部未完成路径不算支持。 |
-| RealVideo 9 / RV40 | CV200产品配置选择real9语法及HAL；不能把备用hir9 stub当成正常生产路径。 |
+| RealVideo 8 / RV30 | Linux已枚举RV30、链接helper，FFmpeg新增rv30_v4l2m2m；但RV被设为非Request格式后，核心stateful作业分发仍只接纳MPEG-4/VC-1，RV解析/HAL/输出链未接通。 |
+| RealVideo 9 / RV40 | Linux已枚举RV40、链接helper，FFmpeg新增rv40_v4l2m2m；同样受核心分发缺口限制，不能把格式可枚举或备用hir9 stub算作正常解码。 |
 | RealVideo 10独立变体覆盖 | 未发现独立RV10产品开关或明确的变体覆盖依据，不把所有RV40品牌变体自动算进来。 |
 
 ### VP6
@@ -415,16 +419,20 @@ CV200 subset-SPS明确限制最多两个视角。Linux虽接受118/128的profile
 
 | 支持的能力 | 说明 |
 | --- | --- |
-| Baseline sequential，8-bit | 独立JPGD解析器/HAL有完整路径；当前Linux没有JPGD节点，CPU JPEG不改变该列。 |
-| Extended sequential，8-bit（SOF1） | 硬件parser同时接受SOF0/SOF1，但实际精度检查仅允许8-bit。 |
+| Baseline sequential，8-bit | BSP独立JPGD解析器/HAL有完整路径；Linux已新增独立节点，但仍使用默认量化/Huffman表，未将图像自身DQT/DHT完整写入硬件。 |
+| Extended sequential，8-bit（SOF1） | BSP接受SOF0/SOF1并限制8-bit；Linux通用解析器可识别SOF1，但JPGD调用端未形成对应精度及硬件配置闭环。 |
 | 4:0:0 / 灰度 | BSP识别单分量并配置YUV400；CV200有对应JPGD采样路径。 |
 | 4:2:0 | BSP解析采样因子并向JPGD写入对应格式；可输出半平面YUV。 |
 | 4:2:2水平采样 | BSP区分YUV422_21并配置采样/输出几何。 |
 | 4:2:2垂直采样 | BSP区分YUV422_12，不与水平采样混为一个布局。 |
 | 4:4:4 | BSP有采样因子、几何和JPGD格式路径；不借用VDEC/JPGE节点。 |
-| Restart interval / DRI | CV200配置保留DRI支持，硬件parser/设置路径可达。 |
-| Progressive JPEG | BSP硬件资格检查拒绝progressive，软件libjpeg能力不算硬解。 |
-| Lossless / arithmetic JPEG | 硬件parser拒绝对应SOF/DAC，精度限定8-bit。 |
+| Restart interval / DRI | CV200 BSP保留DRI支持；Linux成功解析时保存restart interval并写寄存器，但整体JPEG解码配置仍不完整。 |
+| Progressive JPEG | BSP硬件资格检查拒绝progressive；Linux不提供此解码能力，且当前JPGD调用端吞掉解析错误，不能宣称已可靠拒绝所有不支持输入。 |
+| Lossless / arithmetic JPEG | BSP拒绝对应SOF/DAC；Linux不提供此解码能力，通用parser的拒绝结果尚未由JPGD调用端完整传播。 |
+
+Linux新增 `CONFIG_VIDEO_HISTB_JPGD` 和独立 `histb-jpgd` V4L2 M2M节点，公开单平面JPEG输入及NV12/NV16/YUYV输出。但输入采样仍未完整决定硬件配置，尺寸使用协商值而未与JPEG头闭合校验，NV16/YUYV仍沿用NV12的stride/sizeimage计算；因此不能将上述灰度、420、两种422、444及SOF变体整体升级为已完成。
+
+FFmpeg虽有 `mjpeg_v4l2m2m` decoder，当前共享格式映射先选MJPEG，而该驱动仅枚举JPEG；现有精确匹配协商不会自动尝试另一个fourcc。该用户态路径尚不能视为与JPGD端到端接通，CPU MJPEG解码也不改变硬件状态。
 
 ### 未证实或未启用的硬件格式
 
@@ -450,7 +458,7 @@ AVS/AVS+硬件路径依赖17,920字节的`hisilicon/histb-avsp.bin`。缺少固�
 
 CV200生产VENC只启用H.264与JPGE。H.264产品配置的尺寸范围为176..1920×144..1088、picture尺寸4对齐、帧率1..60；这些是产品边界，不是所有组合的实测吞吐承诺。standalone JPGE的BSP校验范围为16..4096，两条编码器不能共用能力结论。
 
-以下profile行表示已实现的编码配置/语法路径。Baseline/Main/High已分别完成320×240、25 fps的最小硬件编码输出及解码检查，不代表全部尺寸、速率与工具组合均已验收；解码输入使用CABAC/CAVLC也不能代替编码profile验证。
+以下profile行表示已实现的编码配置/语法路径。此前Baseline/Main/High分别有320×240、25 fps的最小硬件编码输出及解码检查记录；这些既有记录不覆盖本次新增格式、ROI、OSD、slice split及其全部组合。解码输入使用CABAC/CAVLC也不能代替编码profile验证。
 
 ### H.264 / AVC
 
@@ -463,21 +471,22 @@ CV200生产VENC只启用H.264与JPGE。H.264产品配置的尺寸范围为176..1
 | P图像 | ✅ | ✅ |
 | CAVLC | ✅ | ✅ |
 | CABAC | ✅ | ✅ |
-| 多slice编码 / slice split | ✅ | 🟨 |
+| 多slice编码 / slice split | ✅ | ✅ |
 | 全局码率控制 | ✅ | ✅ |
 | QP控制 | ✅ | ✅ |
 | GOP控制 | ✅ | ✅ |
+| 周期IDR / refresh-period控件 | 🟨 | ✅ |
 | 帧率控制 | ✅ | ✅ |
 | 编码尺寸设置 | ✅ | ✅ |
 | VUI sample aspect ratio | ❌ | ✅ |
 | NV12：8-bit 4:2:0 UV | ✅ | ✅ |
 | 独立Y/UV地址输入 | ✅ | ✅ |
-| NV21：8-bit 4:2:0 VU | ✅ | 🟨 |
+| NV21：8-bit 4:2:0 VU | ✅ | ✅ |
 | Planar 4:2:0输入 | 🟨 | 🟨 |
 | Semiplanar 4:2:2输入 | 🟨 | 🟨 |
-| YUYV输入 | 🟨 | 🟨 |
-| UYVY输入 | 🟨 | 🟨 |
-| YVYU输入 | 🟨 | 🟨 |
+| YUYV输入 | 🟨 | ✅ |
+| UYVY输入 | 🟨 | ✅ |
+| YVYU输入 | 🟨 | ✅ |
 | ROI区域QP | 🟨 | 🟨 |
 | OSD叠加 | 🟨 | 🟨 |
 | B帧编码 | ❌ | ❌ |
@@ -494,23 +503,24 @@ CV200生产VENC只启用H.264与JPGE。H.264产品配置的尺寸范围为176..1
 | P图像 | 使用已重建的参考表面；当前VENC为I/P链路。 |
 | CAVLC | Baseline的实际编码熵模式；不是解码器的CAVLC能力证明。 |
 | CABAC | Main/High的PPS entropy flag和VEDU熵编码位均实现。 |
-| 多slice编码 / slice split | BSP公共属性校验、channel参数与HAL的SliceSplit/SliceSize写入形成闭环，公开byte模式范围512..65535；不承诺运行中任意切换。Linux未接入，当前每帧清零对应PICFG1寄存器。JPGE拒绝slice split不能套用到H.264。 |
-| 全局码率控制 | BSP有通道RC和bitrate属性；Linux为CBR-like帧级反馈，不宣称严格CBR或全套BSP RC策略。 |
-| QP控制 | 全局I/P QP、min/max QP及固定QP路径；不是区域QP接口。 |
+| 多slice编码 / slice split | Linux已开放mode及MAX_MB（1..65535）/MAX_BYTES（512..65535）控件，并编程PICFG1和收集码流描述符链；不承诺任意运行中切换。FFmpeg `-slices` 已接入宏块模式，但当前计数计算未包含宏块宽度，不能承诺恰好N个slice；byte模式未由该选项暴露。 |
+| 全局码率控制 | Linux已开放CBR/VBR模式及帧级反馈RC，VBR复用反馈并放宽至配置QP上下限；不宣称严格HRD-CBR或完整峰值/缓冲约束VBR。bitrate控件范围32768..52428800 bit/s；FFmpeg的 `-maxrate` 在此路径只影响模式选择，不传递该峰值上限。 |
+| QP控制 | 全局I/P QP、min/max QP范围0..51；关闭frame RC可固定I/P QP。FFmpeg `-q:v 26` 设置等值I/P QP；该包装对非正值使用26，不能用 `-q:v 0` 选择固定QP 0。不是区域QP接口。 |
 | GOP控制 | 控制I/P序列的关键帧间隔，不是帧率或B帧间隔。 |
+| 周期IDR / refresh-period控件 | 标准period控件范围0..1000，0关闭；Linux当前按周期强制IDR并调整ME阈值，type仅保存。FFmpeg `-intra_refresh N` 已转发控件，但不等于已实现逐宏块循环帧内刷新，也不能承诺无IDR修复网络丢包。 |
 | 帧率控制 | CV200产品范围1..60；Linux目前只接受整数帧率，30000/1001、60000/1001不在当前接口合同内；不代表所有尺寸/速率组合实测通过。 |
 | 编码尺寸设置 | BSP有宽高属性和SPS crop语法；Linux raw队列宽16对齐、高2对齐，公开S_FMT及左上角crop selection，不提供任意位置或任意缩放。 |
 | VUI sample aspect ratio | 所扫BSP自动SPS不写SAR；Linux的软件SPS生成及标准V4L2 SAR控件已实现。这是软件头处理差异，不是芯片物理能力差异。 |
 | NV12：8-bit 4:2:0 UV | Linux公开NV12M多平面队列并支持DMA-BUF导入；pitch与可见宽度独立协商。 |
 | 独立Y/UV地址输入 | BSP的SrcYAddr/SrcCAddr与HAL分别写入Y/C物理地址；Linux允许不同DMA-BUF fd及非零source data_offset。导入的压缩CAPTURE通过exporter的begin/end_cpu_access维护CPU访问，不能对no-map地址直接做cache操作。 |
-| NV21：8-bit 4:2:0 VU | BSP实际源图像路径和VU selector有依据；Linux固定UV/NV12M。 |
+| NV21：8-bit 4:2:0 VU | Linux公开两平面NV21M并配置VU selector；FFmpeg已有NV21软件帧到NV21M的映射/上传。不要将其当作单平面NV21队列或NV21 DRM PRIME零拷贝合同。 |
 | Planar 4:2:0输入 | BSP有Cr地址及专门stride分支，但尚未实机验证该布局；Linux未开放。 |
 | Semiplanar 4:2:2输入 | BSP通过C stride×2抽取色度行，输出仍是4:2:0；不是High 4:2:2编码。 |
-| YUYV输入 | BSP有packed 422地址/stride及独立selector；Linux未开放。 |
-| UYVY输入 | BSP有packed 422布局路径；不能由该映射外推H.264 4:2:2输出。 |
-| YVYU输入 | BSP有不同字节序selector；当前Linux仍仅NV12M。 |
-| ROI区域QP | BSP有8区域结构/寄存器和使能路径，但缺公共setter及完整区域几何/QP写入闭环；Linux每帧关闭ROI。 |
-| OSD叠加 | BSP有8层结构/寄存器和使能路径，但未找到公开配置及完整地址/stride/alpha写入闭环；Linux每帧关闭OSD。 |
+| YUYV输入 | Linux已公开单平面packed 422输入，配置对应store模式/字节序；FFmpeg有YUYV422映射。输出仍为H.264 4:2:0。 |
+| UYVY输入 | Linux已公开单平面packed 422及对应selector，FFmpeg有UYVY422映射；不扩展H.264输出色度。 |
+| YVYU输入 | Linux已公开单平面packed 422及对应selector，但当前FFmpeg共享V4L2格式表缺YVYU映射，不能仅靠通用像素格式枚举认定已接通。 |
+| ROI区域QP | Linux已有enable/delta-QP控件（−30..30）及固定中央矩形的寄存器写入，FFmpeg `-roi N` 非零时启用。内部虽有8区域结构/写入循环，尚无用户提交任意坐标、尺寸、绝对QP或8区域payload的接口；不能称为完整8区域配置。 |
+| OSD叠加 | Linux已有enable/alpha控件和固定位置/尺寸写入，FFmpeg `-osd N` 仅转发开关/alpha；尚无叠加像素、DMA地址、stride及缓冲生命周期的公共提交路径，不能作为可用水印功能推荐。 |
 | B帧编码 | CV200生产slice模型只有I/P，缺B slice、L1参考和编码重排合同。 |
 | Extended Profile | BSP CheckPrivateAttr明确拒绝；Linux profile菜单也排除Extended。 |
 | Constrained Baseline独立配置 | BSP有profile 66路径，但未证明独立约束配置；Linux profile菜单明确屏蔽Constrained Baseline，不能用FFmpeg的通用枚举代替驱动支持。 |
@@ -530,7 +540,7 @@ CV200生产VENC只启用H.264与JPGE。H.264产品配置的尺寸范围为176..1
 | YUYV输入 | ✅ | ✅ |
 | YVYU输入 | ✅ | ✅ |
 | UYVY输入 | ✅ | ✅ |
-| Planar YUV输入 | ✅ | 🟨 |
+| Planar YUV420输入 | ✅ | ✅ |
 | Quality / 量化表 | ✅ | ✅ |
 | 旋转 | 🟨 | 🟨 |
 | Slice split | ❌ | ❌ |
@@ -549,12 +559,14 @@ CV200生产VENC只启用H.264与JPGE。H.264产品配置的尺寸范围为176..1
 | YUYV输入 | JPGE packed 422及对应字节序selector。 |
 | YVYU输入 | JPGE packed 422及对应字节序selector。 |
 | UYVY输入 | JPGE packed 422及对应字节序selector。 |
-| Planar YUV输入 | BSP standalone JPGE有Y/C/V地址与planar路径；当前Linux仅semi-planar/packed输入。 |
+| Planar YUV420输入 | Linux公开单缓冲连续Y/U/V（V4L2_PIX_FMT_YUV420）；Y stride按32字节对齐，U/V stride为一半。不是planar 422/444或三个独立DMA-BUF接口；FFmpeg上传仍要求源布局与协商stride一致。 |
 | Quality / 量化表 | BSP Qlevel=1..99；Linux JPEG quality=1..100，使用自身量化表规则。 |
-| 旋转 | standalone JPGE有rotation寄存器、stride和JFIF尺寸调整；VENC附带JPEG属性拒绝非0旋转。两条入口不能混为一谈，Linux未开放。 |
+| 旋转 | Linux已开放V4L2_CID_ROTATE的0/90/180/270度及FFmpeg `-rotate`；但422输入90/270度时硬件改为420，SOF仍写原422采样，存在头/硬件配置不一致。因此保留部分实现状态，不能承诺所有输入格式/角度组合。 |
 | Slice split | standalone JPGE资格检查拒绝SlcSplitEn!=0；寄存器字段不构成公开支持。 |
 | Progressive JPEG编码 | 没有相应SOF2和多scan编码路径，不能以软件JPEG能力代替。 |
 | Lossless JPEG编码 | 公开JPGE为8-bit baseline DCT编码，不提供lossless接口。 |
+
+JPGE内核格式与FFmpeg可选格式须分别核对：当前FFmpeg缺NV24/YVYU映射，NV16仅映射到NV16M而非此JPGE的NV16。codec列出的pixel formats不保证每条协商/上传路径可用；DRM PRIME编码上传仍限NV12，不能外推到新增软件帧格式。
 
 ### 其他编码格式
 
@@ -576,23 +588,27 @@ VENC格式转换表还出现planar 422/444、NV42、400/411/410等名称，但�
 
 | 状态 | 能力 | 说明 |
 | --- | --- | --- |
-| ✅ | VDEC tile-to-linear | 当前 `histb-vpss` 在VDEC内部完成tile到线性帧转换，不提供独立通用节点 |
+| ✅ | VDEC tile-to-linear | `histb-vpss` 在VDEC内部完成tile到线性帧转换；新注册的独立M2M节点与此内部路径分开判断 |
 | ✅ | 内部ZME缩放核心 | 装载8-tap luma / 4-tap chroma多档系数并按比例选择；已有3840×2160 Main10到1920×1080 NV12输出记录，50 fps元数据本身不证明整链持续实时吞吐 |
 | ✅ | 解码输出尺寸协商 | capture只向下协商，宽4像素、高2行对齐，缩小比严格低于16:1；可同时完成Main10到8-bit NV12转换，不提供公开放大 |
-| ✅ | VPSS field-rate DEI | FFmpeg显示重排后，`hivxedei`按LAST/CUR/NEXT1/NEXT2提交四场DEI并将独立DMA-BUF交给VENC；当前公共入口限本VDEC的NV12表面、最大1920×1088，不接受任意导入buffer或P010 |
+| ✅ | VPSS field-rate DEI | FFmpeg显示重排后，`hivxedei`按LAST/CUR/NEXT1/NEXT2提交四场DEI并将独立DMA-BUF交给VENC；入口限本VDEC的NV12表面、最大1920×1088，不接受任意导入buffer或P010；必须匹配下述UAPI版本 |
 | ✅ | 内置PQ参数与条件DBM | 已装载含DEI/FMD、DB/DM/DR/DS、SNR/TNR区域的默认表及部分FHD覆盖；四场节点按宽>128、场高>64启用DBM。参数已存在不等于每个处理块均开启 |
 | ✅ | CPU bob（软件） | extra提供 `hivxebob`，不是VPSS硬件DEI；`bwdif`未编入当前交付FFmpeg，不能直接套用其命令 |
-| 🟨 | 完整MCDI去隔行 | BSP有RGME、块/区域运动、投影缓冲及历史写回链；Linux未完成对应生命周期，当前清除MCDI/MEDS使能位 |
-| 🟨 | TNR/SNR/MCNR | BSP有时域/空域降噪及统计链；Linux虽有部分默认参数，仍清除TNR/SNR使能位，未提供完整处理链和用户调节接口 |
-| 🟨 | 独立DB/DM、dering、deshoot调节 | 不同于上面的内置参数和条件DBM，Linux尚未提供独立公共PQ调节接口，不承诺全部增强效果已验收 |
-| 🟨 | 旋转与多输出端口 | BSP有旋转和多port调度；Linux尚未开放，当前后处理主要服务VDEC内部路径 |
-| 🟨 | 完整HDR tone mapping / 3D链 | 当前未接通色彩元数据、tone mapping、双视角缓冲及显示链闭环；Main10转NV12不等于HDR转SDR，MVC parser也不等于完整3D输出 |
+| 🟨 | 独立VPSS M2M及packed 4:2:2 | 已注册独立节点，OUTPUT/CAPTURE枚举NV12、NV21、YUYV、UYVY；尺寸16对齐、范围16..1920×16..1088。但任务仍复用tile输入路径，NV12/NV21及YUYV/UYVY的字节序未分别配置，不能据枚举宣称线性格式双向转换已可用 |
+| 🟨 | 完整MCDI去隔行 | 已增加运动缓冲轮转、BLKMV/RGMV/PRJ地址编程和 `HISTB_VPSS_DEI_MCDI_EN`；仍沿用四场提交，不能据此称为已完成原厂五场MCDI。当前FFmpeg不设置该标志 |
+| 🟨 | TNR/SNR/MCNR | 已增加RFR DMA缓冲及 `HISTB_VPSS_DEI_TNR_EN` 条件下的TNR/SNR/RFR寄存器编程；当前FFmpeg未启用，历史读写和跨会话状态的完整降噪链未验收，不承诺MCNR |
+| 🟨 | 实时PQ与独立增强调节 | VDEC已暴露brightness、contrast、saturation、hue、sharpness标准控件（0..100，默认50）；仅部分DEI参数写入消费brightness/sharpness，且端口配置会重写亮度背景值，不能称为五项画质调节完整生效或完整DB/DM、dering、deshoot接口 |
+| 🟨 | DEI与目标尺寸联动 | UAPI新增 `target_width` / `target_height`，0分别沿用输入宽/完整帧高；内核已将尺寸传入VHD0/ZME。目标边界、目标stride/缓冲容量校验及FFmpeg输出布局/选项尚未闭合，不作为任意尺寸缩放的可用接口推荐 |
+| 🟨 | 旋转与多输出端口 | 当前DEI仍仅有一个destination并写VHD0；目标尺寸联动不是VHD1、并发多端口或一次产生多路分辨率。VPSS旋转也未开放 |
+| 🟨 | 完整HDR tone mapping / 3D链 | 新增Main10→8-bit时的输出dither/round及附加控制位，但未接通HDR传递函数/元数据、BT.2020→BT.709矩阵和tone-mapping曲线；Main10不等于HDR10，不能宣称HDR转SDR已完成。MVC解析与完整3D显示链也分开判断 |
 
 所以“解码器能输出隔行内容”“CPU 滤镜能 bob”和“独立 MCDEI 硬件已开放”是三件不同的事。
 
-当前DEI是VPSS四场硬件处理，不等于原厂完整MCDI、运动估计、TNR或PQ链。旧`dei`/`dei_field_rate`模块参数已移除；DEI由显示重排后的`hivxedei`显式提交，不改变其他解码会话的capture布局。
+当前默认 `hivxedei` 仍只提交四场硬件DEI，不设置MCDI/TNR标志，也不请求目标尺寸；新增内核分支不等于默认转码链已启用这些功能。旧 `dei` / `dei_field_rate` 模块参数已移除；DEI由显示重排后的滤镜显式提交，不改变其他解码会话的capture布局。
 
-非安全 Linux DEI 节点使用 CV200 `CTRL.prot=2`，并为 IGBM/IFMD 提供真实的 32 KiB 统计写回 DMA 区；DBM 按原厂四场节点的尺寸条件启用。统计写回地址不能留为 0。补齐这些配置后，1006 的 TVH Spawn 已实测输出 1920×1080 逐行 50 fps（45 秒抓取含 2170 张视频帧、43.4 秒视频，输出解码无错误）；这不代替 UHD 输入、ALSA 时钟或完整 MCDI 的独立验收。
+**DEI UAPI兼容要求：** `struct histb_vpss_dei_request` 已由含 `reserved` 的32字节布局改为含两个目标尺寸字段的36字节布局；`_IOW` 编入结构体大小，因此 `VIDIOC_HISTB_VPSS_DEI` 编号也改变。旧头文件编译的FFmpeg不能直接配新模块，需同步安装新UAPI头并重新构建、部署匹配的用户态；仅替换 `.ko` 不构成去隔行链验收。
+
+既有匹配版本的非安全Linux DEI节点使用CV200 `CTRL.prot=2`，并为IGBM/IFMD提供真实的32 KiB统计写回DMA区；DBM按原厂四场节点的尺寸条件启用。统计写回地址不能留为0。此前TVH Spawn记录输出1920×1080逐行50 fps（45秒抓取含2170张视频帧、43.4秒视频，输出解码无错误）；这不代替本次UAPI变更后的复验，也不证明UHD输入、ALSA时钟或完整MCDI通过独立验收。
 
 当前 `hivxe-transcode` 使用同一套尺寸/帧率策略：SD/HD保留原尺寸；逐行25/50保留帧率，25帧/秒隔行输入按场输出50p；超过1920×1080的逐行输入由VPSS按比例缩小。码率/GOP不由TVH profile名称推断。picture cadence优先于开流时的packet/r_frame_rate猜测。
 
@@ -637,16 +653,21 @@ bash install.sh
 /usr/local/bin/hivxe-ffmpeg -hide_banner -hwaccels
 /usr/local/bin/hivxe-ffmpeg -hide_banner -encoders
 /usr/local/bin/hivxe-ffmpeg -hide_banner -filters
+/usr/local/bin/hivxe-ffmpeg -hide_banner -h encoder=h264_v4l2m2m
+/usr/local/bin/hivxe-ffmpeg -hide_banner -h encoder=mjpeg_v4l2m2m
 ```
 
-这些列表用于确认组件已编入，不代替硬件实际运行。当前extra的输入硬解选择如下；内核能力矩阵不等于该精简安装包全部启用：
+这些列表用于确认组件已编入，不代替硬件实际运行。以下安装包范围按当前FFmpeg构建工作流的组件选择描述；已安装二进制还须核对版本。内核能力矩阵和新增源码不等于该精简包全部启用，尤其DEI须与内核UAPI匹配：
 
 | 输入视频 | Linux接口 | 当前extra的 `hivxe-transcode` |
 | --- | --- | --- |
 | H.264、HEVC、MPEG-2、AVS/AVS+ | V4L2 Request | 已编入对应decoder/hwaccel，由输入码流选择；AVS+需 `cavsvideo` parser合并两场 |
 | VP8、VP9 | V4L2 Request | 内核已做，当前包未编入相应解码链 |
 | MPEG-4 Part 2、VC-1 | Stateful V4L2 M2M | 内核已有相应路径，当前包未启用对应decoder；固定Request脚本也不会自动改走stateful接口 |
-| MPEG-1、RV、VP6、JPGD、完整MVC | 尚无对应公开Linux路径 | 不能添加一个FFmpeg flag就启用 |
+| MPEG-1 | 部分MPEG2_SLICE Request路径 | 源码有mpeg1_v4l2request，当前包未编入；硬件消息语义也未闭合 |
+| RV30/RV40 | 格式已枚举，stateful分发未接通 | 源码有rv30_v4l2m2m/rv40_v4l2m2m，当前包未编入；换decoder选项也不能补齐内核分发 |
+| JPEG/MJPEG解码 | 独立JPGD M2M部分实现 | 当前包只有CPU mjpeg decoder，未编入mjpeg_v4l2m2m decoder；新增驱动/共享fourcc协商仍有缺口 |
+| VP6、完整MVC | 无完整公开硬解链 | 不能添加一个FFmpeg flag就启用 |
 
 ### 2. 新建 Stream Profile
 
@@ -758,6 +779,8 @@ exec /usr/local/bin/hivxe-ffmpeg -hide_banner -loglevel warning -nostdin \
 
 **`hivxe-transcode`没有 `$@` 参数转发。** 在TVH中写 `hivxe-transcode -b:v 6000000` 不会修改码率；给它外加MAX环境变量也会被脚本内export覆盖。需要不同配置时，复制一份脚本，修改其中的export/FFmpeg参数，再让另一个TVH Stream Profile调用这个副本；不必修改原厂BSP或重新实现TVH集成。
 
+下表新增编码选项以匹配当前源码构建的FFmpeg为前提；先用上面的encoder help核对安装版本。源码有选项、驱动有控件与实际效果通过验证是三个不同条件。默认脚本仍未主动设置ROI、OSD、refresh或slice split。
+
 | 想要的特性 | 在自定义脚本中修改 | 限制 |
 | --- | --- | --- |
 | 最高720p、保留小源 | 将MAX的export改为 `HISTB_V4L2REQUEST_MAX_CAPTURE_SIZE=1280x720` | 保持比例、不放大；先清除CAPTURE_SIZE覆盖 |
@@ -768,6 +791,11 @@ exec /usr/local/bin/hivxe-ffmpeg -hide_banner -loglevel warning -nostdin \
 | 更低/更高目标码率 | 替换现有 `-b:v`，例如 `-b:v 6000000` | 只控制视频目标；CBR-like，不保证每秒字节数恒定 |
 | 调整关键帧间隔 | 替换为 `-g 25` 或 `-g 50` | 单位是输出图像，不改变分辨率/帧率 |
 | 限制量化范围 | 加入 `-qmin 20 -qmax 40` | H.264范围0..51且min≤max；不是固定QP，也不是ROI区域QP |
+| 固定QP | 加入 `-q:v 26` | 关闭帧级RC并设置相同I/P QP；不是目标码率保证，当前包装不能用0选择固定QP 0 |
+| VBR模式 | 如 `-b:v 6000000 -maxrate 8000000` | 当前包装在正maxrate与bitrate不同时选择VBR；8000000这个值本身未作为硬件峰值上限传递 |
+| slice split | 源码已接入 `-slices N`（N>1） | 当前MAX_MB换算遗漏宏块宽度，不保证恰好N片；先单独验证码流，不作为已验收分片策略推荐 |
+| 固定中央ROI的QP偏移 | 如 `-roi -6` | 0关闭，非零范围−30..30；不接受区域坐标，也不能配置任意8区域或独立区域码率 |
+| 周期IDR | 如 `-intra_refresh 50` | 0关闭，最大1000；当前行为是周期强制IDR/阈值调整，不是循环宏块刷新 |
 | 不输出字幕 | 删除 `-map 0:s?` 和 `-c:s copy` | 仅去掉字幕，不改变视频硬件链 |
 | 调试硬件选择/吞吐 | 将日志改为 `-loglevel info`，需要时使用 `debug`，另开终端运行 `hivxe-top` | 日志走stderr，不能混入TS stdout；不要在正常长驻流中使用 `-xerror` |
 
@@ -786,7 +814,7 @@ chmod 0755 /usr/local/bin/hivxe-transcode-720p
 
 其他行保持不变。在TVH再建一个名为 `hivxe-720p` 的MPEG-TS Spawn profile，其Command line填 `/usr/local/bin/hivxe-transcode-720p`。今后更新extra会覆盖标准入口，副本需自行同步上游脚本变化。
 
-以下功能**没有一个可直接启用的flag**：完整MVC/JPGD/RV/VP6/MPEG-1路径、VENC slice split/ROI/OSD、完整MCDI/TNR/SNR、H.264 B帧编码、High10/4:2:2/4:4:4编码及HDR tone mapping。FFmpeg通用选项或枚举的存在不能补齐驱动实现；不要用 `-bf`、`-profile:v 110` 等选项把它们写成可用。
+仍不能用一个flag获得完整MVC/JPGD/RV/VP6/MPEG-1硬解链、任意8区域ROI、可提交图像的OSD、完整MCDI/TNR/SNR、H.264 B帧编码、High10/4:2:2/4:4:4编码或HDR tone mapping。`-osd 1..255` 虽已定义，但仅转发alpha且无像素/DMA提交，不作为可用水印开关推荐；`-bf`、`-profile:v 110` 等通用枚举也不能补齐驱动实现。JPEG的 `-rotate 0/90/180/270` 属于mjpeg_v4l2m2m encoder，不是H.264或VPSS旋转，且受前述422采样头不一致限制。
 
 如需CPU软件解码，应另建脚本并使用相应软件decoder和软件滤镜，不能把CPU帧直接交给 `hivxedei`。当前包提供 `hivxebob`，没有 `bwdif`、`hwdownload` 或 `setfield` 滤镜；强制处理误标为progressive的交错源需要先补齐相应组件/处理链，不能照抄未编入的滤镜命令。
 
@@ -816,7 +844,10 @@ chmod 0755 /usr/local/bin/hivxe-transcode-720p
 - **Linux 当前接口入口**：
   [VDEC](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-vdec-core.c)、
   [VENC](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-venc-core.c)、
-  [JPGE](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-jpge.c)。
+  [JPGE](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-jpge.c)、
+  [JPGD](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-jpgd.c)、
+  [MVC helper](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-vdec-mvc.c)、
+  [RV helper](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-vdec-rv.c)。
 - **BSP语法与HAL交叉核对**：
   [H.264语法](https://github.com/JasonFreeLab/HiSTBLinuxV100R005C00SPC060/blob/master/source/msp/drv/vfmw/vfmw_v5.0/product/Hi3798CV200/LNX_CFG/32bit/core/syntax/h264.S)、
   [MVC语法](https://github.com/JasonFreeLab/HiSTBLinuxV100R005C00SPC060/blob/master/source/msp/drv/vfmw/vfmw_v5.0/product/Hi3798CV200/LNX_CFG/32bit/core/syntax/mvc.S)、
@@ -826,3 +857,11 @@ chmod 0755 /usr/local/bin/hivxe-transcode-720p
 - **Linux构建与后处理**：
   [HiVXE Makefile](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/Makefile)、
   [VPSS](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/drivers/media/platform/hisilicon/histb-vpss.c)。
+- **DEI UAPI与用户态入口**：
+  [histb-vpss.h](https://github.com/HiSilicon-Development/linux-6.12.y/blob/main/include/uapi/linux/histb-vpss.h)、
+  [Request/DEI提交](https://github.com/HiSilicon-Development/FFmpeg/blob/9.0.1/libavcodec/v4l2_request.c)、
+  [hivxedei](https://github.com/HiSilicon-Development/FFmpeg/blob/9.0.1/libavfilter/vf_hivxedei.c)。
+- **FFmpeg编码选项与格式协商**：
+  [VENC包装](https://github.com/HiSilicon-Development/FFmpeg/blob/9.0.1/libavcodec/v4l2_m2m_enc.c)、
+  [JPEG包装](https://github.com/HiSilicon-Development/FFmpeg/blob/9.0.1/libavcodec/v4l2_m2m_jpeg.c)、
+  [V4L2格式映射](https://github.com/HiSilicon-Development/FFmpeg/blob/9.0.1/libavcodec/v4l2_fmt.c)。
